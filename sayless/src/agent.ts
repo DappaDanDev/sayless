@@ -46,7 +46,7 @@ export default defineAgent({
     console.log(`starting assistant example agent for ${participant.identity}`);
 
     const model = new openai.realtime.RealtimeModel({
-      instructions: `You are a helpful assistant that helps users look up wallet balances and transaction history. Follow this flow:
+      instructions: `You are a helpful assistant that helps users look up wallet balances, transaction history, and token prices. Follow this flow:
 
       1. Start by asking "How can I help you?"
 
@@ -64,10 +64,19 @@ export default defineAgent({
       
       3. Only after getting confirmation ("yes"):
          - Use getWalletBalance to fetch the balance
-         - Use getTransactionHistory to fetch the transaction history`,
+         - Use getTransactionHistory to fetch the transaction history
+      
+      4. If they ask about token prices:
+         - Use getTokenPrice to fetch the current price of the token
+      
+      5. If they ask about other information, use the appropriate function to fetch the information`,
       voice: 'alloy',
-      outputAudioFormat: 'pcm16',
-      inputAudioFormat: 'pcm16'
+      turnDetection: {
+        type: 'server_vad',
+        silence_duration_ms: 1000,
+        prefix_padding_ms: 100,
+        threshold: 0.3
+      }
     });
 
     const fncCtx: llm.FunctionContext = {
@@ -200,24 +209,86 @@ export default defineAgent({
           }
         },
       },
+
+      getTokenPrice: {
+        description: 'Get the current price of a token by searching its name and checking spot price',
+        parameters: z.object({
+          tokenName: z.string().describe('The name or symbol of the token to search for'),
+          chain: z.enum(Object.keys(CHAIN_IDS) as [string, ...string[]]).describe('The blockchain to check'),
+        }),
+        execute: async ({ tokenName, chain }) => {
+          const chainId = CHAIN_IDS[chain as keyof typeof CHAIN_IDS];
+          try {
+            // Search for token using the Token API
+            const searchResponse = await fetch(
+              `https://api.1inch.dev/token/v1.2/${chainId}/search?query=${encodeURIComponent(tokenName)}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
+                  'Accept': 'application/json',
+                }
+              }
+            );
+
+            if (!searchResponse.ok) {
+              throw new Error(`Token search API returned status: ${searchResponse.status}`);
+            }
+
+            const searchData = await searchResponse.json();
+            if (!searchData.tokens || searchData.tokens.length === 0) {
+              return `Sorry, I couldn't find a token matching "${tokenName}" on ${chain}`;
+            }
+
+            const token = searchData.tokens[0];
+            console.debug(`Found token: ${token.symbol} (${token.address})`);
+
+            // Get spot price using the token address
+            const priceResponse = await fetch(
+              `https://api.1inch.dev/price/v1.1/chain/${chainId}?tokens=${token.address}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
+                  'Accept': 'application/json',
+                }
+              }
+            );
+
+            if (!priceResponse.ok) {
+              throw new Error(`Spot price API returned status: ${priceResponse.status}`);
+            }
+
+            const priceData = await priceResponse.json();
+            const price = priceData[token.address];
+
+            return `${token.name} (${token.symbol}) on ${chain} is currently worth $${price} USD`;
+          } catch (error: unknown) {
+            console.error('Error fetching token price:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Sorry, I couldn't fetch the token price. Error: ${errorMessage}`;
+          }
+        },
+      },
     };
     const agent = new multimodal.MultimodalAgent({ model, fncCtx });
+    
+    // Create a new session and ensure it's properly typed
     const session = await agent
       .start(ctx.room, participant)
       .then((session) => session as openai.realtime.RealtimeSession);
 
-    // Configure session with proper modalities and audio format
-    session.sessionUpdate({
-      modalities: ["text", "audio"],  // Specify both text and audio modalities
-      outputAudioFormat: "pcm16"      // Use PCM16 format for audio
-    });
-
+    // Initialize the conversation with a greeting first
     session.conversation.item.create(llm.ChatMessage.create({
       role: llm.ChatRole.ASSISTANT,
       text: 'How can I help you today?'
     }));
 
-    session.response.create();
+    // Create a new response without any truncation attempts
+    const response = session.response.create();
+
+    // Handle cleanup when participant disconnects
+    ctx.room.on('participantDisconnected', async () => {
+      await session.close();
+    });
   },
 });
 
