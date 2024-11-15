@@ -28,6 +28,16 @@ const publicClient = createPublicClient({
   transport: http(process.env.ETH_RPC_URL), // Add ETH_RPC_URL to your .env.local
 });
 
+// Add chain mapping
+const CHAIN_IDS = {
+  'ethereum': '1',
+  'base': '8453',
+  'polygon': '137',
+  'arbitrum': '42161',
+  'optimism': '10',
+  'avalanche': '43114',
+} as const;
+
 export default defineAgent({
   entry: async (ctx: JobContext) => {
     await ctx.connect();
@@ -36,34 +46,28 @@ export default defineAgent({
     console.log(`starting assistant example agent for ${participant.identity}`);
 
     const model = new openai.realtime.RealtimeModel({
-      instructions: `You are a helpful assistant that helps users look up wallet balances. ALWAYS follow this exact flow:
+      instructions: `You are a helpful assistant that helps users look up wallet balances and transaction history. Follow this flow:
 
-      1. When a user asks about ANY wallet balance (whether ENS name or address):
-         - First use confirmEnsName to verify the name/address with the user
+      1. Start by asking "How can I help you?"
+
+      2. When a user asks about wallet balance or transaction history:
+         - If they haven't specified a chain, ask which chain they want to check
+         - Use confirmEnsName to verify the name/address with the user
+         - For transaction history, if they haven't specified a limit, ask how many transactions they want to see (max 100)
          - Wait for their response
       
-      2. If they say "no":
-         - Use spellEnsName to help them spell it letter by letter
-         - Continue using spellEnsName until they say "done"
-         - Use the final spelling for the next step
+      2. If they say "no" to the name confirmation:
+         - Use spellEnsName to spell out the name letter by letter
+         - After spelling it out, ask if that's correct
+         - If they say "no", use spellEnsName again
+         - If they say "yes", proceed to the next step
       
-      3. Only after getting confirmation ("yes") or completed spelling ("done"):
+      3. Only after getting confirmation ("yes"):
          - Use getWalletBalance to fetch the balance
-      
-      Example correct flow:
-      User: "What's vitalik.eth's balance?"
-      Assistant: (uses confirmEnsName with "vitalik.eth")
-      User: "yes"
-      Assistant: (uses getWalletBalance)
-
-      Example correction flow:
-      User: "What's vitalik.eth's balance?"
-      Assistant: (uses confirmEnsName with "vitalik.eth")
-      User: "no"
-      Assistant: (uses spellEnsName repeatedly until user says "done")
-      Assistant: (uses getWalletBalance with final spelling)
-
-      IMPORTANT: Never skip the confirmation step, even if the name seems correct.`
+         - Use getTransactionHistory to fetch the transaction history`,
+      voice: 'alloy',
+      outputAudioFormat: 'pcm16',
+      inputAudioFormat: 'pcm16'
     });
 
     const fncCtx: llm.FunctionContext = {
@@ -80,14 +84,13 @@ export default defineAgent({
       },
 
       spellEnsName: {
-        description: 'Help user spell out ENS name letter by letter',
+        description: 'Spell out ENS name letter by letter to the user',
         parameters: z.object({
-          currentAttempt: z.string().describe('The current attempt at spelling the name'),
+          currentAttempt: z.string().describe('The ENS name to spell out'),
         }),
         execute: async ({ currentAttempt }) => {
-          return `Let's spell the ENS name letter by letter. ${
-            currentAttempt ? `So far we have: "${currentAttempt}". ` : ''
-          }What is the next letter? (When finished, say "done")`;
+          const spelled = currentAttempt.split('').join(', ');
+          return `Let me spell that out for you: ${spelled}. Is this correct? Please respond with "yes" or "no".`;
         },
       },
 
@@ -95,8 +98,10 @@ export default defineAgent({
         description: 'Get the balance of an Ethereum wallet address or ENS name after confirmation',
         parameters: z.object({
           addressOrName: z.string().describe('The confirmed Ethereum address or ENS name to check'),
+          chain: z.enum(Object.keys(CHAIN_IDS) as [string, ...string[]]).describe('The blockchain to check'),
         }),
-        execute: async ({ addressOrName }) => {
+        execute: async ({ addressOrName, chain }) => {
+          const chainId = CHAIN_IDS[chain as keyof typeof CHAIN_IDS];
           try {
             // First, try to resolve ENS name if it's not already an address
             let resolvedAddress = addressOrName;
@@ -120,7 +125,7 @@ export default defineAgent({
             // Now fetch the balance using 1inch API with ONLY the resolved address
             console.debug(`checking balance for wallet address ${resolvedAddress}`);
             const response = await fetch(
-              `https://api.1inch.dev/balance/v1.2/1/balances/${resolvedAddress}`,
+              `https://api.1inch.dev/balance/v1.2/${chainId}/balances/${resolvedAddress}`,
               {
                 headers: {
                   'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
@@ -142,11 +147,70 @@ export default defineAgent({
           }
         },
       },
+
+      getTransactionHistory: {
+        description: 'Get transaction history for an Ethereum wallet address or ENS name',
+        parameters: z.object({
+          addressOrName: z.string().describe('The confirmed Ethereum address or ENS name to check'),
+          chain: z.enum(Object.keys(CHAIN_IDS) as [string, ...string[]]).describe('The blockchain to check'),
+          limit: z.number().optional().describe('Number of transactions to fetch (max 100)'),
+        }),
+        execute: async ({ addressOrName, chain, limit }) => {
+          const chainId = CHAIN_IDS[chain as keyof typeof CHAIN_IDS];
+          try {
+            // Resolve ENS name if provided
+            let resolvedAddress = addressOrName;
+            if (!addressOrName.startsWith('0x')) {
+              const ensName = normalize(addressOrName.endsWith('.eth') ? addressOrName : `${addressOrName}.eth`);
+              const address = await publicClient.getEnsAddress({
+                name: ensName,
+              });
+              if (!address) {
+                return `Could not resolve ENS name ${ensName} to an address`;
+              }
+              resolvedAddress = address;
+            }
+
+            // Use default limit of 10 if not specified
+            const queryLimit = limit || 10;
+            if (queryLimit > 100) {
+              return "Sorry, the maximum limit for transactions is 100. Please specify a lower number.";
+            }
+
+            const response = await fetch(
+              `https://api.1inch.dev/history/v1.2/${chainId}/history/events?address=${resolvedAddress}&limit=${queryLimit}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
+                  'Accept': 'application/json',
+                }
+              }
+            );
+
+            if (!response.ok) {
+              throw new Error(`1inch API returned status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            return `Here are the last ${queryLimit} transactions for ${addressOrName} (${resolvedAddress}): ${JSON.stringify(data, null, 2)}`;
+          } catch (error: unknown) {
+            console.error('Error fetching transaction history:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Sorry, I couldn't fetch the transaction history. Error: ${errorMessage}`;
+          }
+        },
+      },
     };
     const agent = new multimodal.MultimodalAgent({ model, fncCtx });
     const session = await agent
       .start(ctx.room, participant)
       .then((session) => session as openai.realtime.RealtimeSession);
+
+    // Configure session with proper modalities and audio format
+    session.sessionUpdate({
+      modalities: ["text", "audio"],  // Specify both text and audio modalities
+      outputAudioFormat: "pcm16"      // Use PCM16 format for audio
+    });
 
     session.conversation.item.create(llm.ChatMessage.create({
       role: llm.ChatRole.ASSISTANT,
