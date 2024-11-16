@@ -78,8 +78,17 @@ export default defineAgent({
          - Ask them which account type they prefer (options: SCA or EOA)
          - Use createCircleWallet with their chosen options to create the wallet
          - Share the new wallet details with them
+         - After creating the wallet, ask if they would like to fund it with test tokens
+         - If they say yes, use fundWallet with the new wallet's address and blockchain
+         - If they say no, let them know they can request funding later
+
+      6. When a user wants to fund an existing wallet:
+         - Make sure you have both the wallet address and blockchain network
+         - Use fundWallet to request test tokens
+         - The supported networks are: MATIC-AMOY, SOL-DEVNET, or ETH-SEPOLIA
+         - Share the funding request status with the user
       
-      6. If they ask about other information, use the appropriate function to fetch the information
+      7. If they ask about other information, use the appropriate function to fetch the information
       
   Important: When handling token names:
   - Always confirm the token name spelling with the user before proceeding
