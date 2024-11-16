@@ -17,6 +17,10 @@ import { z } from 'zod';
 import { normalize } from 'viem/ens';
 import { createPublicClient, http } from 'viem';
 import { mainnet } from 'viem/chains';
+import { v4 as uuidv4 } from 'uuid';
+import { generateKeyPair, randomBytes } from 'crypto';
+import { promisify } from 'util';
+import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.join(__dirname, '../.env.local');
@@ -46,11 +50,11 @@ export default defineAgent({
     console.log(`starting assistant example agent for ${participant.identity}`);
 
     const model = new openai.realtime.RealtimeModel({
-      instructions: `You are a helpful assistant that helps users look up wallet balances, transaction history, and token prices. Follow this flow:
+      instructions: `You are a helpful assistant that helps users look up wallet balances, transaction history, and token prices.
 
-      1. Start by asking "How can I help you?"
+   You will be asked questions on based on the following scenarios: 
 
-      2. When a user asks about wallet balance or transaction history:
+      1. When a user asks about wallet balance or transaction history:
          - If they haven't specified a chain, ask which chain they want to check
          - Use confirmEnsName to verify the name/address with the user
          - For transaction history, if they haven't specified a limit, ask how many transactions they want to see (max 100)
@@ -68,8 +72,20 @@ export default defineAgent({
       
       4. If they ask about token prices:
          - Use getTokenPrice to fetch the current price of the token
+
+      5. When a user wants to create a new wallet:
+         - Ask them which blockchain they want to use (options: MATIC-AMOY, SOL-DEVNET, or ETH-SEPOLIA)
+         - Ask them which account type they prefer (options: SCA or EOA)
+         - Use createCircleWallet with their chosen options to create the wallet
+         - Share the new wallet details with them
       
-      5. If they ask about other information, use the appropriate function to fetch the information`,
+      6. If they ask about other information, use the appropriate function to fetch the information
+      
+  Important: When handling token names:
+  - Always confirm the token name spelling with the user before proceeding
+  - Example: If user asks for "etherium", confirm if they mean "ethereum"
+  - Only proceed with the price check after user confirms`,
+      
       voice: 'alloy',
       turnDetection: {
         type: 'server_vad',
@@ -186,22 +202,42 @@ export default defineAgent({
               return "Sorry, the maximum limit for transactions is 100. Please specify a lower number.";
             }
 
-            const response = await fetch(
-              `https://api.1inch.dev/history/v1.2/${chainId}/history/events?address=${resolvedAddress}&limit=${queryLimit}`,
+            const historyUrl = `https://api.1inch.dev/history/v2.0/history/${resolvedAddress}/events`;
+
+            // Construct URL with query parameters
+            const params = new URLSearchParams({
+              chainId: chainId,
+              limit: queryLimit.toString() // Add limit parameter from user input
+            });
+
+            const historyResponse = await fetch(
+              `${historyUrl}?${params}`,
               {
+                method: 'GET',
                 headers: {
                   'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
-                  'Accept': 'application/json',
+                  'Accept': 'application/json'
                 }
               }
             );
 
-            if (!response.ok) {
-              throw new Error(`1inch API returned status: ${response.status}`);
+            if (!historyResponse.ok) {
+              console.error('Transaction history fetch failed:', {
+                status: historyResponse.status,
+                statusText: historyResponse.statusText,
+                url: historyUrl,
+                params: {
+                  chainId,
+                  limit
+                }
+              });
+              throw new Error(`Transaction history API returned status: ${historyResponse.status}`);
             }
 
-            const data = await response.json();
-            return `Here are the last ${queryLimit} transactions for ${addressOrName} (${resolvedAddress}): ${JSON.stringify(data, null, 2)}`;
+            const historyData = await historyResponse.json();
+            console.log('Raw history response:', historyData);
+
+            return `Here are the last ${queryLimit} transactions for ${addressOrName} (${resolvedAddress}): ${JSON.stringify(historyData, null, 2)}`;
           } catch (error: unknown) {
             console.error('Error fetching transaction history:', error);
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -210,18 +246,46 @@ export default defineAgent({
         },
       },
 
+      confirmTokenName: {
+        description: 'Confirm the token name spelling with the user',
+        parameters: z.object({
+          name: z.string().describe('The token name to confirm'),
+        }),
+        execute: async ({ name }) => {
+          console.log('confirmTokenName called:', { name });
+          return `I want to look up the price for "${name}". Is this spelling correct? Please respond with "yes" to proceed or "no" to spell it differently.`;
+        },
+      },
+
       getTokenPrice: {
         description: 'Get the current price of a token by searching its name and checking spot price',
         parameters: z.object({
-          tokenName: z.string().describe('The name or symbol of the token to search for'),
+          tokenName: z.string().describe('The confirmed token name to search for'),
           chain: z.enum(Object.keys(CHAIN_IDS) as [string, ...string[]]).describe('The blockchain to check'),
         }),
         execute: async ({ tokenName, chain }) => {
+          console.log('getTokenPrice called:', { tokenName, chain });
           const chainId = CHAIN_IDS[chain as keyof typeof CHAIN_IDS];
           try {
-            // Search for token using the Token API
+            // Search for token using the Token API with query parameters
+            const searchUrl = `https://api.1inch.dev/token/v1.2/${chainId}/search`;
+            const searchParams = new URLSearchParams({
+              query: tokenName,
+              only_positive_rating: 'true'
+            });
+            
+            // Log the raw request details
+            console.log('Token search request:', {
+              url: searchUrl,
+              params: searchParams.toString(),
+              headers: {
+                'Authorization': 'Bearer <REDACTED>',
+                'Accept': 'application/json',
+              }
+            });
+            
             const searchResponse = await fetch(
-              `https://api.1inch.dev/token/v1.2/${chainId}/search?query=${encodeURIComponent(tokenName)}`,
+              `${searchUrl}?${new URLSearchParams(searchParams)}`,
               {
                 headers: {
                   'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
@@ -231,40 +295,125 @@ export default defineAgent({
             );
 
             if (!searchResponse.ok) {
+              console.error('Token search failed:', { 
+                status: searchResponse.status,
+                statusText: searchResponse.statusText,
+                url: searchUrl,
+                params: searchParams
+              });
               throw new Error(`Token search API returned status: ${searchResponse.status}`);
             }
 
             const searchData = await searchResponse.json();
-            if (!searchData.tokens || searchData.tokens.length === 0) {
+            console.log('Raw search response:', searchData);
+
+            if (!Array.isArray(searchData) || searchData.length === 0) {
+              console.log('No tokens found for query:', tokenName);
               return `Sorry, I couldn't find a token matching "${tokenName}" on ${chain}`;
             }
 
-            const token = searchData.tokens[0];
-            console.debug(`Found token: ${token.symbol} (${token.address})`);
+            // Get the first token from the search results
+            const token = searchData[0];
+            console.log('Selected token for price check:', {
+              symbol: token.symbol,
+              name: token.name,
+              address: token.address,
+              chain: chain
+            });
 
-            // Get spot price using the token address
+            // Get spot price using ONLY the token address from the search response
+            const priceUrl = `https://api.1inch.dev/price/v1.1/${chainId}`;
+            
             const priceResponse = await fetch(
-              `https://api.1inch.dev/price/v1.1/chain/${chainId}?tokens=${token.address}`,
+              priceUrl,
               {
+                method: 'POST',
                 headers: {
                   'Authorization': `Bearer ${process.env.INCH_API_KEY}`,
                   'Accept': 'application/json',
-                }
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  tokens: [token.address],
+                  currency: "USD"
+                })
               }
             );
 
             if (!priceResponse.ok) {
+              console.error('Price fetch failed:', {
+                status: priceResponse.status,
+                statusText: priceResponse.statusText,
+                url: priceUrl,
+                body: {
+                  tokens: [token.address],
+                  currency: "USD"
+                }
+              });
               throw new Error(`Spot price API returned status: ${priceResponse.status}`);
             }
 
             const priceData = await priceResponse.json();
+            console.log('Raw price response:', priceData);
+
+            // The response format is { "tokenAddress": "priceInUSD" }
             const price = priceData[token.address];
+            console.log('Price data received:', { 
+              tokenAddress: token.address,
+              price: price 
+            });
 
             return `${token.name} (${token.symbol}) on ${chain} is currently worth $${price} USD`;
           } catch (error: unknown) {
-            console.error('Error fetching token price:', error);
+            console.error('Error in getTokenPrice:', {
+              error: error instanceof Error ? error.message : 'Unknown error',
+              tokenName,
+              chain,
+              chainId,
+              stack: error instanceof Error ? error.stack : undefined
+            });
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             return `Sorry, I couldn't fetch the token price. Error: ${errorMessage}`;
+          }
+        },
+      },
+
+      createCircleWallet: {
+        description: 'Create a new Circle wallet for the user',
+        parameters: z.object({
+          blockchain: z.enum(['MATIC-AMOY', 'SOL-DEVNET', 'ETH-SEPOLIA']).describe('The blockchain network for the wallet'),
+          accountType: z.enum(['SCA', 'EOA']).describe('The type of account to create'),
+        }),
+        execute: async ({ blockchain, accountType }) => {
+          try {
+            const client = initiateDeveloperControlledWalletsClient({
+              apiKey: process.env.CIRCLE_API_KEY!,
+              entitySecret: process.env.CIRCLE_ENTITY_SECRET!
+            });
+
+            const response = await client.createWalletSet({
+              name: 'sayless1'
+            });
+
+            const walletSetId = response.data?.walletSet.id;
+            if (!walletSetId) {
+              throw new Error('Failed to create wallet set: missing wallet set ID');
+            }
+
+            const walletResponse = await client.createWallets({
+              blockchains: ['ETH-SEPOLIA'],
+              count: 1,
+              walletSetId: walletSetId
+            });
+
+            return `Successfully created a new ${accountType} wallet on ${blockchain}:
+              Address: ${walletResponse.data?.wallets[0].address}
+              Blockchain: ${walletResponse.data?.wallets[0].blockchain}`;
+
+          } catch (error) {
+            console.error('Error in createCircleWallet:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Failed to create wallet: ${errorMessage}`;
           }
         },
       },
