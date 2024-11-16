@@ -461,6 +461,7 @@ export default defineAgent({
 
             const response = await fetch(url, options);
             const data = await response.json();
+            console.log(data)
 
             if (response.ok) {
               return `Successfully requested test tokens for your wallet:
@@ -474,6 +475,43 @@ export default defineAgent({
             console.error('Error in fundWallet:', error);
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             return `Failed to fund wallet: ${errorMessage}`;
+          }
+        },
+      },
+
+      deployContract: {
+        description: 'Deploy an ERC20 token contract with specified parameters',
+        parameters: z.object({
+          name: z.string().describe('The name of the token'),
+          symbol: z.string().describe('The symbol of the token'),
+          totalSupply: z.string().describe('The total supply of the token'),
+        }),
+        execute: async ({ name, symbol, totalSupply }) => {
+          try {
+            const url = 'https://gwysygyxpvc7dat55so4q7miaa.multibaas.com/api/v0/contracts/erc20/deploy';
+            const options = {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.CURVE_GRID_KEY}`
+              },
+              body: JSON.stringify({
+                from: "0x24bF6580ED276b6ff33269DD361eE00FE3a2c912",
+                signer: "0x24bF6580ED276b6ff33269DD361eE00FE3a2c912",
+                args: [name, symbol, totalSupply]
+              })
+            };
+
+            console.log('Request body:', options.body);
+
+            const response = await fetch(url, options);
+            const data = await response.json();
+            console.log('Raw API Response:', data);
+
+            return `Contract deployment initiated. Check the console for deployment details.`;
+          } catch (error) {
+            console.error('Error in deployContract:', error);
+            return `Failed to deploy contract. Check console for details.`;
           }
         },
       },
