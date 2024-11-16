@@ -8,13 +8,15 @@ import {
   import { dirname } from 'path';
   import { fileURLToPath } from 'url';
   import dotenv from 'dotenv';
-  import crypto from 'crypto';
+  import forge from 'node-forge';
 
 // ... imports reain unchanged ...
 
 async function main() {
   // Generate entity secret using crypto instead of generateEntitySecret
   const entitySecret = crypto.randomBytes(32).toString('hex');
+
+  generateEntitySecretCiphertext(entitySecret)
   
   console.log('Generated entity secret:', entitySecret);
 

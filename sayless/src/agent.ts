@@ -388,7 +388,7 @@ export default defineAgent({
           try {
             const client = initiateDeveloperControlledWalletsClient({
               apiKey: process.env.CIRCLE_API_KEY!,
-              entitySecret: process.env.CIRCLE_ENTITY_SECRET!
+              entitySecret: process.env.ENTITY_SECRET!
             });
 
             const response = await client.createWalletSet({
