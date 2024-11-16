@@ -387,24 +387,35 @@ export default defineAgent({
         execute: async ({ blockchain, accountType }) => {
           try {
             const client = initiateDeveloperControlledWalletsClient({
-              apiKey: process.env.CIRCLE_API_KEY!,
-              entitySecret: process.env.ENTITY_SECRET!
-            });
+              apiKey: 'TEST_API_KEY:93dd4d5865d2c49be6acef5259c1866e:82972958035a307d9b42906e763e331a',
+              entitySecret: '9be810e30c3e952193e924f6b1888b9123b49dfccc328df5d66d844c7cb0e64d'
+          });
 
-            const response = await client.createWalletSet({
-              name: 'sayless1'
-            });
 
-            const walletSetId = response.data?.walletSet.id;
-            if (!walletSetId) {
-              throw new Error('Failed to create wallet set: missing wallet set ID');
-            }
+            // const client = initiateDeveloperControlledWalletsClient({
+            //   apiKey: process.env.CIRCLE_API_KEY!,
+            //   entitySecret: process.env.ENTITY_SECRET!
+            // });
 
-            const walletResponse = await client.createWallets({
-              blockchains: ['ETH-SEPOLIA'],
-              count: 1,
-              walletSetId: walletSetId
-            });
+            // const response = await client.createWalletSet({
+            //   name: 'sayless1'
+            // });
+
+            // const walletSetId = response.data?.walletSet.id;
+            // if (!walletSetId) {
+            //   throw new Error('Failed to create wallet set: missing wallet set ID');
+            // }
+
+        
+
+          const walletResponse = await client.createWallets({
+            accountType: 'EOA',
+            blockchains: ['ETH-SEPOLIA'],
+            walletSetId: 'f379a57e-6ebe-5945-a5f0-0633133fea8d',
+            count: 1
+        });
+        console.log(walletResponse.data?.wallets[0].address)
+
 
             return `Successfully created a new ${accountType} wallet on ${blockchain}:
               Address: ${walletResponse.data?.wallets[0].address}
@@ -414,6 +425,46 @@ export default defineAgent({
             console.error('Error in createCircleWallet:', error);
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             return `Failed to create wallet: ${errorMessage}`;
+          }
+        },
+      },
+
+      fundWallet: {
+        description: 'Request test tokens for a newly created wallet',
+        parameters: z.object({
+          address: z.string().describe('The wallet address to fund'),
+          blockchain: z.enum(['MATIC-AMOY', 'SOL-DEVNET', 'ETH-SEPOLIA']).describe('The blockchain network of the wallet'),
+        }),
+        execute: async ({ address, blockchain }) => {
+          try {
+            const url = 'https://api.circle.com/v1/faucet/drips';
+            const options = {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.CIRCLE_API_KEY}`
+              },
+              body: JSON.stringify({
+                destinationAddress: address,
+                blockchain: blockchain
+              })
+            };
+
+            const response = await fetch(url, options);
+            const data = await response.json();
+
+            if (response.ok) {
+              return `Successfully requested test tokens for your wallet:
+                Status: ${data.status}
+                Destination Address: ${address}
+                Blockchain: ${blockchain}`;
+            } else {
+              throw new Error(`API request failed: ${data.message || 'Unknown error'}`);
+            }
+          } catch (error) {
+            console.error('Error in fundWallet:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Failed to fund wallet: ${errorMessage}`;
           }
         },
       },
